@@ -1,0 +1,163 @@
+services:
+  capteurs:
+    build: ./capteurs/
+    container_name: capteurs_raffinerie
+    environment:
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - INTERVAL=${INTERVAL:-5}
+    volumes:
+      - ./capteurs:/app/capteurs
+    restart: unless-stopped
+    networks:
+      - reseau_raffinerie
+    depends_on:
+      - mosquitto
+
+  mosquitto:
+    image: eclipse-mosquitto
+    container_name: mosquitto
+    ports:
+      - "9002:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    networks:
+      - reseau_raffinerie
+
+  mqtt-to-kafka-bridge:
+    build: ./bridge/
+    container_name: mqtt-to-kafka-bridge
+    depends_on:
+      - kafka
+      - mosquitto
+    networks:
+      - reseau_raffinerie
+    restart: unless-stopped
+
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    networks:
+      - reseau_raffinerie
+
+  kafka:
+    image: wurstmeister/kafka:latest
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_CREATE_TOPICS=raw_data:1:1
+    depends_on:
+      - zookeeper
+    networks:
+      reseau_raffinerie:
+        aliases:
+          - kafka
+
+  kafdrop:
+    image: obsidiandynamics/kafdrop
+    container_name : kafkaUI
+    restart: unless-stopped
+    ports:
+      - "9007:9000"
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - reseau_raffinerie
+
+
+  kafka_connect:
+    image: confluentinc/cp-kafka-connect:7.3.0
+    depends_on:
+      - kafka
+      - mosquitto
+    ports:
+      - "8084:8083" 
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: "mqtt-connect-group"
+      CONNECT_CONFIG_STORAGE_TOPIC: "mqtt-connect-config"
+      CONNECT_OFFSET_STORAGE_TOPIC: "mqtt-connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "mqtt-connect-status"
+      CONNECT_MQTT_SOURCE_ENABLED: "true"
+      CONNECT_MQTT_SOURCE_MQTT_SERVER_URI: "tcp://mosquitto:1883"
+      CONNECT_MQTT_SOURCE_MQTT_TOPICS: "capteurs/#"
+      CONNECT_MQTT_SOURCE_KAFKA_TOPIC: "raw_data"
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/etc/kafka-connect/jars"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+    volumes:
+      - ./plugins:/usr/share/java/plugins
+      - ./connectors:/etc/kafka-connect/jars
+    networks:
+      - reseau_raffinerie
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-tsdbadmin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - ./timescaledb/db_data:/var/lib/postgresql/data
+      - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - reseau_raffinerie
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    hostname: minio
+    ports:
+      - "9005:9000"
+      - "9006:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-admin123}
+    volumes:
+      - ./minio/data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      reseau_raffinerie:
+        aliases:
+          - minio
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=timescale-data-source
+
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+    depends_on:
+      - timescaledb
+    networks:
+      - reseau_raffinerie
+
+networks:
+  reseau_raffinerie:
+    driver: bridge
